@@ -1,3 +1,4 @@
+xie@PC231031:~/vnt-2/vnt-core/src/tunnel_core/p2p/transport$ cat nat_test.rs
 use crate::context::AppState;
 use rust_p2p_core::nat::{NatInfo, NatType};
 use rust_p2p_core::tunnel::SocketManager;
@@ -148,14 +149,23 @@ async fn my_nat_info_impl(app_context: &AppState, socket_manager: &SocketManager
 }
 
 pub async fn query_udp_public_addr_loop(app_context: AppState, socket_manager: SocketManager) {
-    let mut udp_stun_servers = app_context.udp_stun();
-    if udp_stun_servers.is_empty() {
-        udp_stun_servers = default_udp_stun();
-    }
-    let udp_len = udp_stun_servers.len();
-    let mut udp_count = 0;
     let stun_request = rust_p2p_core::stun::send_stun_request();
+    let mut udp_count = 0;
     loop {
+        // 每次循环都重新读取 UDP STUN 配置，与 TCP 保持一致
+        let udp_stun_servers = {
+            let servers = app_context.udp_stun();
+            if servers.is_empty() {
+                default_udp_stun()
+            } else {
+                servers
+            }
+        };
+        let udp_len = udp_stun_servers.len();
+        if udp_len == 0 {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            continue;
+        }
         let stun = &udp_stun_servers[udp_count % udp_len];
         udp_count += 1;
         match tokio::net::lookup_host(stun.as_str()).await {
@@ -190,25 +200,26 @@ pub(crate) async fn query_tcp_public_addr_loop(
     use rand::Rng;
     use rand::seq::SliceRandom;
 
-    let tcp_stun_servers = {
-        let servers = app_context.tcp_stun();
-        if servers.is_empty() {
-            default_tcp_stun()
-        } else {
-            servers
-        }
-    };
-
-    if tcp_stun_servers.is_empty() {
-        return;
-    }
-    log::debug!("tcp_stun_servers = {tcp_stun_servers:?}");
-
     let stun_request = rust_p2p_core::stun::send_stun_request();
-    let target_conn_count = tcp_stun_servers.len().min(2);
     let mut active_connections: HashMap<SocketAddr, (TcpStream, SocketAddr)> = HashMap::new();
 
     'outer: loop {
+        // 每次循环都重新读取 TCP STUN 配置
+        let tcp_stun_servers = {
+            let servers = app_context.tcp_stun();
+            if servers.is_empty() {
+                default_tcp_stun()
+            } else {
+                servers
+            }
+        };
+        if tcp_stun_servers.is_empty() {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            continue;
+        }
+        log::debug!("tcp_stun_servers = {tcp_stun_servers:?}");
+        let target_conn_count = tcp_stun_servers.len().min(2);
+
         while active_connections.len() < target_conn_count {
             let mut candidates: Vec<&String> = tcp_stun_servers.iter().collect();
             candidates.shuffle(&mut rand::rng());
