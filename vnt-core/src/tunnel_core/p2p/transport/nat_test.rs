@@ -1,4 +1,3 @@
-xie@PC231031:~/vnt-2/vnt-core/src/tunnel_core/p2p/transport$ cat nat_test.rs
 use crate::context::AppState;
 use rust_p2p_core::nat::{NatInfo, NatType};
 use rust_p2p_core::tunnel::SocketManager;
