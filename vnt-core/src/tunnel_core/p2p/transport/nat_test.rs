@@ -148,23 +148,14 @@ async fn my_nat_info_impl(app_context: &AppState, socket_manager: &SocketManager
 }
 
 pub async fn query_udp_public_addr_loop(app_context: AppState, socket_manager: SocketManager) {
-    let stun_request = rust_p2p_core::stun::send_stun_request();
+    let mut udp_stun_servers = app_context.udp_stun();
+    if udp_stun_servers.is_empty() {
+        udp_stun_servers = default_udp_stun();
+    }
+    let udp_len = udp_stun_servers.len();
     let mut udp_count = 0;
+    let stun_request = rust_p2p_core::stun::send_stun_request();
     loop {
-        // 每次循环都重新读取 UDP STUN 配置，与 TCP 保持一致
-        let udp_stun_servers = {
-            let servers = app_context.udp_stun();
-            if servers.is_empty() {
-                default_udp_stun()
-            } else {
-                servers
-            }
-        };
-        let udp_len = udp_stun_servers.len();
-        if udp_len == 0 {
-            tokio::time::sleep(Duration::from_secs(10)).await;
-            continue;
-        }
         let stun = &udp_stun_servers[udp_count % udp_len];
         udp_count += 1;
         match tokio::net::lookup_host(stun.as_str()).await {
@@ -200,10 +191,10 @@ pub(crate) async fn query_tcp_public_addr_loop(
     use rand::seq::SliceRandom;
 
     let stun_request = rust_p2p_core::stun::send_stun_request();
-    let mut active_connections: HashMap<SocketAddr, (TcpStream, SocketAddr)> = HashMap::new();
+    let mut rng = rand::rng();
 
-    'outer: loop {
-        // 每次循环都重新读取 TCP STUN 配置
+    loop {
+        // 动态读取 TCP STUN 服务器列表
         let tcp_stun_servers = {
             let servers = app_context.tcp_stun();
             if servers.is_empty() {
@@ -216,141 +207,56 @@ pub(crate) async fn query_tcp_public_addr_loop(
             tokio::time::sleep(Duration::from_secs(10)).await;
             continue;
         }
-        log::debug!("tcp_stun_servers = {tcp_stun_servers:?}");
-        let target_conn_count = tcp_stun_servers.len().min(2);
 
-        while active_connections.len() < target_conn_count {
-            let mut candidates: Vec<&String> = tcp_stun_servers.iter().collect();
-            candidates.shuffle(&mut rand::rng());
+        // 尝试每个 STUN 服务器，直到有一个成功返回公网地址
+        let mut candidates: Vec<&String> = tcp_stun_servers.iter().collect();
+        candidates.shuffle(&mut rng);
 
-            let mut connected = false;
-            for stun in candidates {
-                let addr = match tokio::net::lookup_host(stun.as_str()).await {
-                    Ok(mut addrs) => addrs.next(),
-                    Err(e) => {
-                        log::debug!("lookup_host failed {stun} {e}");
-                        continue;
-                    }
-                };
-
-                let Some(addr) = addr else {
-                    continue;
-                };
-
-                if active_connections.contains_key(&addr) {
+        let mut succeeded = false;
+        for stun in &candidates {
+            let addr = match tokio::net::lookup_host(stun.as_str()).await {
+                Ok(mut addrs) => addrs.next(),
+                Err(e) => {
+                    log::debug!("lookup_host failed {stun} {e}");
                     continue;
                 }
+            };
+            let Some(addr) = addr else { continue };
 
-                let Some(w) = socket_manager.tcp_socket_manager_as_ref() else {
-                    continue;
-                };
+            let Some(w) = socket_manager.tcp_socket_manager_as_ref() else {
+                continue;
+            };
 
-                match tokio::time::timeout(Duration::from_secs(5), w.connect_reuse_port_raw(addr))
-                    .await
-                {
-                    Ok(Ok(mut tcp_stream)) => {
-                        let write_result = tokio::time::timeout(
-                            Duration::from_secs(5),
-                            tcp_stream.write_all(&stun_request),
-                        )
-                        .await;
-
-                        if let Ok(Ok(_)) = write_result {
-                            match stun_tcp_read(&mut tcp_stream).await {
-                                Ok(pub_addr) => {
-                                    log::debug!(
-                                        "update_tcp_public_addr {stun} {addr} -> {pub_addr}"
-                                    );
-
-                                    let existing_pub_addr =
-                                        active_connections.values().next().map(|(_, p)| *p);
-
-                                    if let Some(existing) = existing_pub_addr
-                                        && existing != pub_addr
-                                    {
-                                        log::debug!(
-                                            "pub_addr mismatch: {existing} != {pub_addr}, wait 60s"
-                                        );
-                                        active_connections.clear();
-                                        app_context.nat_info.update_tcp_public_addr(
-                                            SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0).into(),
-                                        );
-                                        tokio::time::sleep(Duration::from_secs(5 * 60)).await;
-                                        continue 'outer;
-                                    }
-
-                                    active_connections.insert(addr, (tcp_stream, pub_addr));
-                                    connected = true;
-                                    break;
-                                }
-                                Err(e) => {
-                                    log::debug!("stun_tcp_read failed {stun} {addr} {e}");
-                                }
-                            }
-                        } else {
-                            log::debug!("write stun request failed {stun} {addr}");
-                        }
-                    }
-                    Ok(Err(e)) => {
-                        log::debug!("connect_reuse_port_raw failed {stun} {addr} {e}");
-                    }
-                    Err(_) => {
-                        log::debug!("connect_reuse_port_raw timeout {stun} {addr}");
-                    }
-                }
-            }
-
-            if !connected {
-                break;
-            }
-        }
-        let existing_pub_addr = active_connections.values().next().map(|(_, p)| *p);
-        if let Some(existing) = existing_pub_addr {
-            app_context.nat_info.update_tcp_public_addr(existing);
-        }
-
-        let sleep_secs = rand::rng().random_range(10u64..=15);
-        tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
-
-        let mut to_remove = Vec::new();
-        let addrs: Vec<SocketAddr> = active_connections.keys().cloned().collect();
-
-        for addr in addrs {
-            let (tcp_stream, _) = active_connections.get_mut(&addr).unwrap();
-            let mut buf = [0u8; 1024];
-
-            match tcp_stream.try_read(&mut buf) {
-                Ok(0) => {
-                    log::warn!("stun tcp close {addr} EOF");
-                    to_remove.push(addr);
-                    continue;
-                }
-                Err(e) if e.kind() != std::io::ErrorKind::WouldBlock => {
-                    log::warn!("stun tcp read error {addr} {e}");
-                    to_remove.push(addr);
-                    continue;
-                }
-                _ => {}
-            }
-
-            match tokio::time::timeout(Duration::from_secs(3), tcp_stream.write_all(&stun_request))
-                .await
+            // 短连接：连接 -> 发送请求 -> 读取响应 -> 立即关闭
+            match tokio::time::timeout(Duration::from_secs(5), async {
+                let mut stream = w.connect_reuse_port_raw(addr).await?;
+                stream.write_all(&stun_request).await?;
+                stun_tcp_read(&mut stream).await
+            })
+            .await
             {
-                Ok(Ok(_)) => {}
+                Ok(Ok(pub_addr)) => {
+                    log::debug!("tcp stun via {stun} ({addr}) -> {pub_addr}");
+                    app_context.nat_info.update_tcp_public_addr(pub_addr);
+                    succeeded = true;
+                    break; // 成功就退出内层循环
+                }
                 Ok(Err(e)) => {
-                    log::warn!("stun tcp write error {addr} {e}");
-                    to_remove.push(addr);
+                    log::debug!("tcp stun via {stun} ({addr}) failed: {e}");
                 }
                 Err(_) => {
-                    log::warn!("stun tcp write timeout {addr}");
-                    to_remove.push(addr);
+                    log::debug!("tcp stun via {stun} ({addr}) timed out");
                 }
             }
         }
 
-        for addr in to_remove {
-            active_connections.remove(&addr);
+        if !succeeded {
+            log::debug!("tcp stun: all servers failed this round");
         }
+
+        // 10 分钟后再探测一次（随机 580~620 秒避免同步）
+        let sleep_secs = rng.random_range(580u64..=620);
+        tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
     }
 }
 
@@ -395,3 +301,4 @@ fn default_tcp_stun() -> Vec<String> {
         "stun.nextcloud.com:443".to_string(),
     ]
 }
+ENDOFFILE
