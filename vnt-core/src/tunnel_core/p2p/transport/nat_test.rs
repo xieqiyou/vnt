@@ -2,9 +2,8 @@ use crate::context::AppState;
 use rust_p2p_core::nat::{NatInfo, NatType};
 use rust_p2p_core::tunnel::SocketManager;
 use rust_p2p_core::tunnel::udp::Model;
-use std::collections::HashMap;
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -191,7 +190,6 @@ pub(crate) async fn query_tcp_public_addr_loop(
     use rand::seq::SliceRandom;
 
     let stun_request = rust_p2p_core::stun::send_stun_request();
-    let mut rng = rand::rng();
 
     loop {
         // 动态读取 TCP STUN 服务器列表
@@ -210,7 +208,7 @@ pub(crate) async fn query_tcp_public_addr_loop(
 
         // 尝试每个 STUN 服务器，直到有一个成功返回公网地址
         let mut candidates: Vec<&String> = tcp_stun_servers.iter().collect();
-        candidates.shuffle(&mut rng);
+        candidates.shuffle(&mut rand::rng());
 
         let mut succeeded = false;
         for stun in &candidates {
@@ -239,7 +237,7 @@ pub(crate) async fn query_tcp_public_addr_loop(
                     log::debug!("tcp stun via {stun} ({addr}) -> {pub_addr}");
                     app_context.nat_info.update_tcp_public_addr(pub_addr);
                     succeeded = true;
-                    break; // 成功就退出内层循环
+                    break;
                 }
                 Ok(Err(e)) => {
                     log::debug!("tcp stun via {stun} ({addr}) failed: {e}");
@@ -255,7 +253,7 @@ pub(crate) async fn query_tcp_public_addr_loop(
         }
 
         // 10 分钟后再探测一次（随机 580~620 秒避免同步）
-        let sleep_secs = rng.random_range(580u64..=620);
+        let sleep_secs = rand::rng().random_range(580u64..=620);
         tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
     }
 }
