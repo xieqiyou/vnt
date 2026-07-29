@@ -102,7 +102,7 @@ jobs:
             whoami
             env | sort
             sudo pkg install -y git protobuf llvm15
-            curl --proto 'https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.85.0
+            curl --proto 'https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.88.0
             source $HOME/.cargo/env
             export CC=clang
             export CXX=clang++
