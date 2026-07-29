@@ -301,4 +301,3 @@ fn default_tcp_stun() -> Vec<String> {
         "stun.nextcloud.com:443".to_string(),
     ]
 }
-ENDOFFILE
