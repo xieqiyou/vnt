@@ -670,6 +670,8 @@ async fn stop_vnt_handler(State(state): State<HttpAppState>) -> Json<ApiResponse
     if state.status() == VntStatus::Stopped {
         return Json(ApiResponse::error("Vnt stopped"));
     }
+    // 立刻标记为已停止，不等异步任务结束
+    state.stopped();
     state.task_group_manager.stop();
 
     let _ = fs::write(CURRENT_CONFIG_RECORD, "").await;
