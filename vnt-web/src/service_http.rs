@@ -566,6 +566,10 @@ async fn start_vnt_network(
     log::info!("Registering with server");
 
     let reg_msg = loop {
+            if state.status() == VntStatus::Stopped {
+        log::info!("Stop requested during registration, exiting");
+        return Ok(());
+            }
         let reg_msg = match network_manager.register().await {
             Ok(rs) => rs,
             Err(e) => {
